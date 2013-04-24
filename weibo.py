@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-__version__ = '1.0.9'
+__version__ = '1.1.2'
 __author__ = 'Liao Xuefeng (askxuefeng@gmail.com)'
 
 '''
@@ -18,11 +18,11 @@ try:
 except ImportError:
     from StringIO import StringIO
 
-import gzip, time, hmac, base64, hashlib, urllib, urllib2, logging, mimetypes
+import gzip, time, hmac, base64, hashlib, urllib, urllib2, logging, mimetypes, collections
 
 class APIError(StandardError):
     '''
-    raise APIError if got failed json message.
+    raise APIError if receiving json message indicating failure.
     '''
     def __init__(self, error_code, error, request):
         self.error_code = error_code
@@ -34,7 +34,7 @@ class APIError(StandardError):
         return 'APIError: %s: %s, request: %s' % (self.error_code, self.error, self.request)
 
 def _parse_json(s):
-    ' parse str to JsonDict '
+    ' parse str into JsonDict '
 
     def _obj_hook(pairs):
         ' convert json object to python object '
@@ -45,29 +45,42 @@ def _parse_json(s):
     return json.loads(s, object_hook=_obj_hook)
 
 class JsonDict(dict):
-    ' general json object that can bind any fields but also act as a dict '
+    ' general json object that allows attributes to be bound to and also behaves like a dict '
+
     def __getattr__(self, attr):
-        return self[attr]
+        try:
+            return self[attr]
+        except KeyError:
+            raise AttributeError(r"'JsonDict' object has no attribute '%s'" % attr)
 
     def __setattr__(self, attr, value):
         self[attr] = value
 
-    def __getstate__(self):
-        return self.copy()
-
-    def __setstate__(self, state):
-        self.update(state)
-
 def _encode_params(**kw):
-    ' do url-encode parameters '
+    '''
+    do url-encode parameters
+
+    >>> _encode_params(a=1, b='R&D')
+    'a=1&b=R%26D'
+    >>> _encode_params(a=u'\u4e2d\u6587', b=['A', 'B', 123])
+    'a=%E4%B8%AD%E6%96%87&b=A&b=B&b=123'
+    '''
     args = []
     for k, v in kw.iteritems():
-        qv = v.encode('utf-8') if isinstance(v, unicode) else str(v)
-        args.append('%s=%s' % (k, urllib.quote(qv)))
+        if isinstance(v, basestring):
+            qv = v.encode('utf-8') if isinstance(v, unicode) else v
+            args.append('%s=%s' % (k, urllib.quote(qv)))
+        elif isinstance(v, collections.Iterable):
+            for i in v:
+                qv = i.encode('utf-8') if isinstance(i, unicode) else str(i)
+                args.append('%s=%s' % (k, urllib.quote(qv)))
+        else:
+            qv = str(v)
+            args.append('%s=%s' % (k, urllib.quote(qv)))
     return '&'.join(args)
 
 def _encode_multipart(**kw):
-    ' build a multipart/form-data body with generated random boundary '
+    ' build a multipart/form-data body with randomly generated boundary '
     boundary = '----------%s' % hex(int(time.time() * 1000))
     data = []
     for k, v in kw.iteritems():
@@ -122,7 +135,7 @@ def _read_body(obj):
 
 def _http_call(the_url, method, authorization, **kw):
     '''
-    send an http request and expect to return a json object if no error.
+    send an http request and return a json object if no error occurred.
     '''
     params = None
     boundary = None
@@ -194,7 +207,7 @@ class APIClient(object):
         parse signed request when using in-site app.
 
         Returns:
-            dict object that like { 'uid': 12345, 'access_token': 'ABC123XYZ', 'expires': unix-timestamp }, 
+            dict object like { 'uid': 12345, 'access_token': 'ABC123XYZ', 'expires': unix-timestamp },
             or None if parse failed.
         '''
 
@@ -225,7 +238,7 @@ class APIClient(object):
 
     def get_authorize_url(self, redirect_uri=None, **kw):
         '''
-        return the authroize url that should be redirect.
+        return the authorization url that the user should be redirected to.
         '''
         redirect = redirect_uri if redirect_uri else self.redirect_uri
         if not redirect:
@@ -238,7 +251,7 @@ class APIClient(object):
 
     def request_access_token(self, code, redirect_uri=None):
         '''
-        return access token as object: {"access_token":"your-access-token","expires_in":12345678,"uid":1234}, expires_in is standard unix-epoch-time
+        return access token as a JsonDict: {"access_token":"your-access-token","expires_in":12345678,"uid":1234}, expires_in is represented using standard unix-epoch-time
         '''
         redirect = redirect_uri if redirect_uri else self.redirect_uri
         if not redirect:
@@ -248,6 +261,22 @@ class APIClient(object):
                 client_secret = self.client_secret, \
                 redirect_uri = redirect, \
                 code = code, grant_type = 'authorization_code')
+        current = int(time.time())
+        expires = r.expires_in + current
+        remind_in = r.get('remind_in', None)
+        if remind_in:
+            rtime = int(remind_in) + current
+            if rtime < expires:
+                expires = rtime
+        return JsonDict(access_token=r.access_token, expires=expires, expires_in=expires, uid=r.get('uid', None))
+
+    def refresh_token(self, refresh_token):
+        req_str = '%s%s' % (self.auth_url, 'access_token')
+        r = _http_post(req_str, \
+            client_id = self.client_id, \
+            client_secret = self.client_secret, \
+            refresh_token = refresh_token, \
+            grant_type = 'refresh_token')
         current = int(time.time())
         expires = r.expires_in + current
         remind_in = r.get('remind_in', None)
@@ -304,3 +333,6 @@ class _Callable(object):
 
     __repr__ = __str__
 
+if __name__=='__main__':
+    import doctest
+    doctest.testmod()
